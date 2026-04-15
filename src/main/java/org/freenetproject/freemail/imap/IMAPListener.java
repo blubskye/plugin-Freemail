@@ -36,6 +36,8 @@ import org.freenetproject.freemail.utils.Logger;
 
 public class IMAPListener extends ServerListener implements Runnable, ConfigClient {
 	private static final int LISTENPORT = 4143;
+	// H3: Hard cap on simultaneous IMAP connections from local mail clients.
+	private static final int MAX_IMAP_CONNECTIONS = 20;
 	private String bindaddress;
 	private int bindport;
 	private final AccountManager accountManager;
@@ -65,10 +67,27 @@ public class IMAPListener extends ServerListener implements Runnable, ConfigClie
 	}
 
 	public void realrun() throws IOException {
-		sock = new ServerSocket(this.bindport, 10, InetAddress.getByName(this.bindaddress));
+		InetAddress bindAddr = InetAddress.getByName(this.bindaddress);
+		// C5: Same non-loopback cleartext credential warning as SMTP.
+		if(!bindAddr.isLoopbackAddress()) {
+			Logger.error(this, "IMAP server is bound to non-loopback address " +
+				bindaddress + ". Credentials are transmitted in cleartext — " +
+				"restrict to 127.0.0.1 unless you have an external TLS proxy.");
+		}
+		sock = new ServerSocket(this.bindport, 10, bindAddr);
 		sock.setSoTimeout(60000);
 		while(!sock.isClosed()) {
 			try {
+				// H3: Reap first so the live count is accurate.
+				reapHandlers();
+				if(countActiveHandlers() >= MAX_IMAP_CONNECTIONS) {
+					Socket refused = sock.accept();
+					refused.getOutputStream().write(
+						"* BYE Server too busy — try again later\r\n".getBytes("UTF-8"));
+					refused.getOutputStream().flush();
+					refused.close();
+					continue;
+				}
 				Socket clientSocket = sock.accept();
 				IMAPHandler newcli = new IMAPHandler(accountManager, clientSocket);
 				Thread newthread = new Thread(newcli, "Freemail IMAP Handler for " + clientSocket.getInetAddress());
@@ -80,8 +99,6 @@ public class IMAPListener extends ServerListener implements Runnable, ConfigClie
 			} catch (IOException ioe) {
 
 			}
-
-			reapHandlers();
 		}
 	}
 }

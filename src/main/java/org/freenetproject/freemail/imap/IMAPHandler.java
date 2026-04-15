@@ -337,13 +337,15 @@ public class IMAPHandler extends ServerHandler implements Runnable {
 			Integer current = msgs.firstKey();
 			MailMessage m =msgs.get(msgs.firstKey());
 
-			// if it's recent, add to the tally
-			if(m.flags.isRecent()) {
-				numrecent++;
-
-				// remove the recent flag
-				m.flags.clearRecent();
-				m.storeFlags();
+			// H11: Synchronize on the MailMessage to make the isRecent check and the
+			// clearRecent()+storeFlags() write atomic, preventing races with concurrent
+			// FETCH or STORE commands in other IMAP handler threads.
+			synchronized(m) {
+				if(m.flags.isRecent()) {
+					numrecent++;
+					m.flags.clearRecent();
+					m.storeFlags();
+				}
 			}
 
 			msgs = msgs.tailMap(new Integer(current.intValue()+1));
@@ -628,14 +630,16 @@ public class IMAPHandler extends ServerHandler implements Runnable {
 			return true;
 		} else if(attr.startsWith("body")) {
 			// TODO: this is not quite right since it will match bodyanything
-			mmsg.flags.setSeen();
-
 			this.ps.print(a.substring(0, "body".length()));
 			this.ps.flush();
 			a = a.substring("body".length());
 			if(this.sendBody(mmsg, a, false)) {
-				mmsg.flags.setSeen();
-				mmsg.storeFlags();
+				// H11: Synchronize the setSeen+storeFlags pair to prevent races
+				// with concurrent STORE commands from other handler threads.
+				synchronized(mmsg) {
+					mmsg.flags.setSeen();
+					mmsg.storeFlags();
+				}
 				return true;
 			}
 			return false;
@@ -890,7 +894,10 @@ public class IMAPHandler extends ServerHandler implements Runnable {
 			setFlagTo = true;
 		} else {
 			for(MailMessage message : mmsgs) {
-				message.flags.clear();
+				// H11: clear() must be atomic with respect to concurrent STORE commands.
+				synchronized(message) {
+					message.flags.clear();
+				}
 			}
 			setFlagTo = true;
 		}
@@ -903,8 +910,11 @@ public class IMAPHandler extends ServerHandler implements Runnable {
 			}
 
 			for(MailMessage message : mmsgs) {
-				message.flags.set(flag, setFlagTo);
-				message.storeFlags();
+				// H11: set+storeFlags must be atomic to avoid partial flag state.
+				synchronized(message) {
+					message.flags.set(flag, setFlagTo);
+					message.storeFlags();
+				}
 			}
 		}
 
@@ -1250,6 +1260,12 @@ public class IMAPHandler extends ServerHandler implements Runnable {
 			datalen = Integer.parseInt(sdatalen);
 		} catch (NumberFormatException nfe) {
 			this.reply(msg, "BAD Unable to parse literal length");
+			return;
+		}
+
+		// H11/DoS: Reject absurdly large literals before allocating memory.
+		if(datalen > 100_000_000) {
+			this.reply(msg, "NO Literal too large");
 			return;
 		}
 

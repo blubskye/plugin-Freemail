@@ -15,6 +15,11 @@ repositories {
 dependencies {
 	compileOnly group: 'org.freenetproject', name: 'fred', version: '0.7.5.1501'
 
+	// FLIP security upgrades (C1): modern BouncyCastle + Argon2 for password hashing
+	implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+	implementation 'org.bouncycastle:bcutil-jdk18on:1.78.1'
+	implementation 'de.mkammerer:argon2-jvm:2.11'
+
 	testImplementation group: 'org.freenetproject', name: 'fred', version: '0.7.5.1501'
 	testImplementation group: 'org.hamcrest', name: 'hamcrest', version: '3.0'
 	testImplementation group: 'junit', name: 'junit', version: '4.13.2'
@@ -26,6 +31,10 @@ jar {
 		attributes 'Main-Class': 'org.freenetproject.freemail.FreemailCli'
 		attributes 'Plugin-Main-Class': 'org.freenetproject.freemail.FreemailPlugin'
 	}
+
+	// Exclude duplicate META-INF entries (e.g. BouncyCastle signature files) that
+	// appear in both the existing transitive dependency and the newly added jars.
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
 	from {
 		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }

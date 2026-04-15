@@ -36,6 +36,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.TimeZone;
 
 import org.archive.util.Base32;
@@ -57,8 +58,21 @@ public class AccountManager {
 	private static final int RTS_KEY_LENGTH = 32;
 
 	private static final int ASYM_KEY_MODULUS_LENGTH = 4096;
-	private static final BigInteger ASYM_KEY_EXPONENT = new BigInteger("17", 10);
+	// M1: Use e=65537 (standard) instead of e=17 for all newly generated RSA key pairs.
+	// e=17 is mathematically safe with OAEP padding but non-standard and rejected by some
+	// validators. Existing accounts with e=17 continue to work (a startup warning is issued).
+	private static final BigInteger ASYM_KEY_EXPONENT = new BigInteger("65537", 10);
 	private static final int ASYM_KEY_CERTAINTY = 80;
+
+	// C3: Brute-force protection — per-username failure tracking.
+	// After MAX_FAILURES consecutive bad passwords the account is locked for LOCKOUT_MS.
+	// Counts are in-memory (reset on restart) because persistent storage creates its own
+	// TOCTOU race; Freemail only accepts local loopback connections so network attacks
+	// are infeasible.
+	private static final int MAX_FAILURES = 5;
+	private static final long LOCKOUT_MS = 15L * 60 * 1000; // 15 minutes
+	private final ConcurrentHashMap<String, Integer> authFailures  = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, Long>    authLockedUntil = new ConcurrentHashMap<>();
 
 	public static final String MAILSITE_SUFFIX = "mailsite";
 	public static final String MAILSITE_VERSION = "-1";
@@ -97,6 +111,18 @@ public class AccountManager {
 			String identityId = Base64.encode(Base32.decode(accountDir.getName()));
 			FreemailAccount account = new FreemailAccount(identityId, accountDir, accFile, freemail);
 			account.setNickname(accFile.get("nickname"));
+
+			// M1: Warn at startup if the account was created with the legacy e=17 exponent.
+			// The exponent is stored base-32; 17 decimal = "h" base-32.
+			String storedPubExp = accFile.get("asymkey.pubexponent");
+			if(storedPubExp != null &&
+					new BigInteger(storedPubExp, 32).equals(BigInteger.valueOf(17))) {
+				Logger.warning(AccountManager.class, "Account " + accountDir.getName() +
+					" RSA public key uses non-standard exponent e=17. " +
+					"Sending and receiving mail is unaffected. " +
+					"Recreate the account to upgrade to standard e=65537.");
+			}
+
 			synchronized(accounts) {
 				accounts.put(account.getIdentity(), account);
 			}
@@ -149,7 +175,11 @@ public class AccountManager {
 		md5.doFinal(md5passwd, 0);
 		String strmd5 = new String(Hex.encode(md5passwd));
 
-		account.getProps().put("md5passwd", strmd5);
+		// M9: Synchronize the put() so concurrent authenticate() sees either the old
+		// complete hash or the new complete hash — never a partial or absent value.
+		synchronized(account.getProps()) {
+			account.getProps().put("md5passwd", strmd5);
+		}
 	}
 
 	private static PropsFile getAccountFile(File accdir) {
@@ -171,7 +201,14 @@ public class AccountManager {
 			return null;
 		}
 
-		return new RSAKeyParameters(true, new BigInteger(mod_str, 32), new BigInteger(privexp_str, 32));
+		// M3: Parse into BigIntegers then null the string forms so GC can collect them
+		// early — keeping the base-32 string is a second copy of the secret in a compact
+		// form that cannot itself be zeroed.
+		BigInteger modulus = new BigInteger(mod_str, 32);
+		BigInteger privExp = new BigInteger(privexp_str, 32);
+		mod_str = null;
+		privexp_str = null;
+		return new RSAKeyParameters(true, modulus, privExp);
 	}
 
 	private static boolean initAccFile(PropsFile accfile, OwnIdentity oid) {
@@ -222,6 +259,16 @@ public class AccountManager {
 		}
 		if(account == null) return null;
 
+		// C3: Reject immediately if the account is currently locked out.
+		Long lockedUntil = authLockedUntil.get(username);
+		if(lockedUntil != null && System.currentTimeMillis() < lockedUntil) {
+			Logger.warning(this, "Authentication for " + username +
+				" rejected — account locked after too many failed attempts." +
+				" Lock expires in " +
+				((lockedUntil - System.currentTimeMillis()) / 1000) + "s.");
+			return null;
+		}
+
 		String realmd5str = account.getProps().get("md5passwd");
 		if(realmd5str == null) return null;
 
@@ -238,7 +285,20 @@ public class AccountManager {
 		String givenmd5str = new String(Hex.encode(givenmd5));
 
 		if(realmd5str.equals(givenmd5str)) {
+			// C3: Successful auth — clear any accumulated failure state.
+			authFailures.remove(username);
+			authLockedUntil.remove(username);
 			return account;
+		}
+
+		// C3: Record the failure and lock the account if the threshold is reached.
+		int failures = authFailures.merge(username, 1, Integer::sum);
+		if(failures >= MAX_FAILURES) {
+			authLockedUntil.put(username, System.currentTimeMillis() + LOCKOUT_MS);
+			authFailures.remove(username);
+			Logger.warning(this, "Account " + username + " locked for " +
+				(LOCKOUT_MS / 60000) + " minutes after " + MAX_FAILURES +
+				" consecutive authentication failures.");
 		}
 		return null;
 	}

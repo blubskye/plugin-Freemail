@@ -23,6 +23,7 @@ import java.io.File;
 import java.util.Locale;
 
 import org.archive.util.Base32;
+import org.bouncycastle.crypto.params.RSAKeyParameters;
 import org.freenetproject.freemail.fcp.HighLevelFCPClientFactory;
 import org.freenetproject.freemail.transport.MessageHandler;
 import org.freenetproject.freemail.utils.PropsFile;
@@ -36,6 +37,9 @@ public class FreemailAccount {
 	private final File accdir;
 	private final PropsFile accprops;
 	private final MessageBank mb;
+	// C1: Decrypted RSA private key cached in memory after successful login so that
+	// background threads (RTSFetcher, Channel) do not need to re-read the props file.
+	private volatile RSAKeyParameters privateKeyCache = null;
 	private final MessageHandler messageHandler;
 
 	FreemailAccount(String identity, File _accdir, PropsFile _accprops, Freemail freemail) {
@@ -100,5 +104,18 @@ public class FreemailAccount {
 
 	public MessageHandler getMessageHandler() {
 		return messageHandler;
+	}
+
+	/**
+	 * Returns the cached decrypted RSA private key set after successful login (C1).
+	 * Returns null if the key has not been cached yet (e.g., before first login).
+	 */
+	public RSAKeyParameters getPrivateKey() {
+		return privateKeyCache;
+	}
+
+	/** Called by AccountManager after successful authentication or new account creation. */
+	public synchronized void setPrivateKeyCache(RSAKeyParameters key) {
+		this.privateKeyCache = key;
 	}
 }

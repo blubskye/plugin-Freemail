@@ -36,14 +36,13 @@ import java.math.BigInteger;
 import org.bouncycastle.crypto.digests.SHA256Digest;
 import org.bouncycastle.crypto.params.RSAKeyParameters;
 import org.bouncycastle.crypto.AsymmetricBlockCipher;
+import org.bouncycastle.crypto.encodings.OAEPEncoding;
 import org.bouncycastle.crypto.engines.RSAEngine;
 import org.bouncycastle.crypto.InvalidCipherTextException;
 import org.bouncycastle.crypto.engines.AESEngine;
+import org.bouncycastle.crypto.modes.GCMBlockCipher;
+import org.bouncycastle.crypto.params.AEADParameters;
 import org.bouncycastle.crypto.params.KeyParameter;
-import org.bouncycastle.crypto.params.ParametersWithIV;
-import org.bouncycastle.crypto.paddings.PKCS7Padding;
-import org.bouncycastle.crypto.paddings.PaddedBufferedBlockCipher;
-import org.bouncycastle.crypto.modes.CBCBlockCipher;
 import org.bouncycastle.crypto.DataLengthException;
 import org.freenetproject.freemail.fcp.ConnectionTerminatedException;
 import org.freenetproject.freemail.fcp.FCPException;
@@ -349,6 +348,15 @@ public class RTSFetcher implements SlotSaveCallback {
 		}
 
 		RSAKeyParameters their_pubkey = new RSAKeyParameters(false, new BigInteger(their_modulus, 32), new BigInteger(their_exponent, 32));
+
+		// M1: Warn if the sending identity's public key uses the legacy e=17 exponent.
+		// Signature verification proceeds normally; this is informational only.
+		if(their_pubkey.getExponent().equals(BigInteger.valueOf(17))) {
+			Logger.warning(this, "Sender RSA public key uses non-standard exponent e=17. " +
+				"Signature verification proceeds; sender should recreate their Freemail " +
+				"account to upgrade to standard e=65537.");
+		}
+
 		AsymmetricBlockCipher deccipher = new RSAEngine();
 		deccipher.init(false, their_pubkey);
 
@@ -405,12 +413,15 @@ public class RTSFetcher implements SlotSaveCallback {
 	}
 
 	private byte[] decrypt_rts(File rtsmessage) throws IOException, InvalidCipherTextException {
-		// initialise our ciphers
-		RSAKeyParameters ourprivkey = AccountManager.getPrivateKey(account.getProps());
-		AsymmetricBlockCipher deccipher = new RSAEngine();
-		deccipher.init(false, ourprivkey);
+		// C1: Use cached private key; fall back to props if cache is null.
+		RSAKeyParameters ourprivkey = account.getPrivateKey();
+		if(ourprivkey == null) {
+			ourprivkey = AccountManager.getPrivateKey(account.getProps());
+		}
 
-		PaddedBufferedBlockCipher aescipher = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()), new PKCS7Padding());
+		// Channel patch: RSA+OAEP decryption (matches the sender-side OAEP encryption).
+		AsymmetricBlockCipher deccipher = new OAEPEncoding(new RSAEngine(), new SHA256Digest());
+		deccipher.init(false, ourprivkey);
 
 		// first n bytes will be an encrypted RSA block containting the
 		// AES IV and Key. Read that.
@@ -430,10 +441,16 @@ public class RTSFetcher implements SlotSaveCallback {
 
 			byte[] aes_iv_and_key = deccipher.processBlock(encrypted_params, 0, encrypted_params.length);
 
-			KeyParameter kp = new KeyParameter(aes_iv_and_key, aescipher.getBlockSize(), aes_iv_and_key.length - aescipher.getBlockSize());
-			ParametersWithIV kpiv = new ParametersWithIV(kp, aes_iv_and_key, 0, aescipher.getBlockSize());
+			// Channel patch: AES-GCM decryption (matches sender-side GCM encryption).
+			// aes_iv_and_key layout: bytes 0-15 = IV/nonce, bytes 16-47 = 256-bit key.
+			byte[] aesIV  = new byte[16];
+			byte[] aesKey = new byte[aes_iv_and_key.length - 16];
+			System.arraycopy(aes_iv_and_key, 0,  aesIV,  0, 16);
+			System.arraycopy(aes_iv_and_key, 16, aesKey, 0, aesKey.length);
+
+			GCMBlockCipher aescipher = new GCMBlockCipher(new AESEngine());
 			try {
-				aescipher.init(false, kpiv);
+				aescipher.init(false, new AEADParameters(new KeyParameter(aesKey), 128, aesIV));
 			} catch (IllegalArgumentException iae) {
 				fis.close();
 				throw new InvalidCipherTextException(iae.getMessage());
