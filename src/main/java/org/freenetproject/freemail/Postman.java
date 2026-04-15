@@ -74,7 +74,14 @@ public abstract class Postman {
 				if(!this.validateFrom(addr)) {
 					newmsg.removeHeader("From", from);
 					if(addr.realname == null) addr.realname = "";
-					addr.realname = "**SPOOFED** "+addr.realname;
+					// M5: Strip any pre-existing **SPOOFED** prefix before prepending.
+					// Without this an attacker can craft a realname that starts with
+					// "**SPOOFED**" so the marker doubles up, or set a realname that
+					// begins with "**SPOOFED** LegitName" to impersonate a trusted sender.
+					while(addr.realname.startsWith("**SPOOFED**")) {
+						addr.realname = addr.realname.substring("**SPOOFED**".length()).trim();
+					}
+					addr.realname = "**SPOOFED** " + addr.realname;
 					addr.realname = addr.realname.trim();
 					newmsg.addHeader("From", addr.toLongString());
 				}
@@ -154,7 +161,9 @@ public abstract class Postman {
 			}
 
 			while((line = br.readLine()) != null) {
-				if(line.indexOf(boundary) > 0) {
+				// M7: Off-by-one fix — original used > 0 which missed a boundary at
+				// index 0 (start of line). Any occurrence is a collision; use >= 0.
+				if(line.indexOf(boundary) >= 0) {
 					// The random boundary string appears in the
 					// message! What are the odds!?
 					// try again

@@ -49,6 +49,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
+import java.security.SecureRandom;
 import java.util.Random;
 import java.util.Set;
 import java.util.Vector;
@@ -73,7 +74,10 @@ public class MailMessage {
 	private BufferedReader brdr;
 	private int msg_seqnum = 0;
 	public IMAPMessageFlags flags;
-	private static final Random messageIdRandom = new Random();
+	// M8: Use SecureRandom instead of java.util.Random for Message-ID generation.
+	// java.util.Random uses a 48-bit LCG whose state is recoverable from two consecutive
+	// outputs; an attacker observing two IDs can predict all future IDs.
+	private static final Random messageIdRandom = new SecureRandom();
 
 	public MailMessage(File f, int msg_seqnum) {
 		this.file = f;
@@ -267,8 +271,12 @@ public class MailMessage {
 				parts = null;
 				parts = line.split(": ", 2);
 
-				if(parts.length < 2)
+				if(parts.length < 2) {
 					parts = null;
+				} else {
+					// C1/C2: Strip CRLF from header values to prevent header injection.
+					parts[1] = MailHeaderFilter.stripCRLF(parts[1]);
+				}
 			}
 		}
 

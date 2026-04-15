@@ -220,4 +220,14 @@ public class MailHeaderFilter {
 			return null;
 		}
 	}
+
+	/**
+	 * C1/C2: Strip CR and LF characters from email header values.
+	 * Prevents header injection / CRLF injection attacks.
+	 */
+	public static String stripCRLF(String s) {
+		if (s == null) return null;
+		return s.replace("\r", " ")
+		        .replace("\n", " ");
+	}
 }

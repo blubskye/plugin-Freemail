@@ -349,6 +349,15 @@ public class RTSFetcher implements SlotSaveCallback {
 		}
 
 		RSAKeyParameters their_pubkey = new RSAKeyParameters(false, new BigInteger(their_modulus, 32), new BigInteger(their_exponent, 32));
+
+		// M1: Warn if the sending identity's public key uses the legacy e=17 exponent.
+		// Signature verification proceeds normally; this is informational only.
+		if(their_pubkey.getExponent().equals(BigInteger.valueOf(17))) {
+			Logger.warning(this, "Sender RSA public key uses non-standard exponent e=17. " +
+				"Signature verification proceeds; sender should recreate their Freemail " +
+				"account to upgrade to standard e=65537.");
+		}
+
 		AsymmetricBlockCipher deccipher = new RSAEngine();
 		deccipher.init(false, their_pubkey);
 

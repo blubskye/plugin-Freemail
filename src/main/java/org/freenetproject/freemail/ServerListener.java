@@ -76,6 +76,14 @@ public abstract class ServerListener {
 		handlerThreads.add(thrd);
 	}
 
+	// H3: Returns the current number of live (not yet reaped) handler threads.
+	// Callers should call reapHandlers() first so the count reflects active clients.
+	protected int countActiveHandlers() {
+		synchronized(handlers) {
+			return handlers.size();
+		}
+	}
+
 	protected void reapHandlers() {
 		// clean up dead handlers...
 		synchronized(handlers) {
